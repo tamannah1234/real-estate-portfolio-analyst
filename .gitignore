@@ -8,5 +8,13 @@ venv/
 __pycache__/
 *.py[cod]
 
+# Node
+frontend/node_modules/
+frontend/dist/
+
+
 # Test/cache files
 .pytest_cache/
+
+#Allow an example environment file if needed:
+!.env.example
