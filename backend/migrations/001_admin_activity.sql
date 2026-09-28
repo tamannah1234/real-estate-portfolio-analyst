@@ -1,0 +1,10 @@
+ALTER TABLE conversations
+    ADD COLUMN IF NOT EXISTS flagged_for_attention BOOLEAN NOT NULL DEFAULT FALSE;
+
+CREATE TABLE IF NOT EXISTS tool_activity (
+    activity_id BIGSERIAL PRIMARY KEY,
+    user_id TEXT NOT NULL,
+    tool_name TEXT NOT NULL,
+    succeeded BOOLEAN NOT NULL DEFAULT TRUE,
+    created_at TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP
+);
