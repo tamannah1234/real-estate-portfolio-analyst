@@ -7,9 +7,12 @@ A small FastAPI and React application for asking questions about real-estate por
 ```mermaid
 flowchart TD
     Browser[React chat and operations UI] --> API[FastAPI routes]
-    API --> Chat[Rule-based chat and request validation]
+    API --> Chat[Chat orchestration and request validation]
+    Chat -->|OPENROUTER_API_KEY set| LLM[Optional LangChain OpenRouter tool selection]
+    Chat -->|Key missing or request unavailable| Rules[Existing rule-based chat]
+    LLM --> Tools[Allowlisted backend tools]
     API --> Tools[Database tools]
-    Chat --> Tools
+    Rules --> Tools
     Tools --> DB[(PostgreSQL)]
     Chat --> Conversation[Conversation history]
     Conversation --> DB
@@ -17,7 +20,7 @@ flowchart TD
     Activity --> DB
 ```
 
-Database queries and calculations belong to backend tools. Chat intent parsing is deterministic. OpenRouter and LangChain are intentionally not configured and no API key is required.
+Database queries and deterministic calculations belong to backend tools. When `OPENROUTER_API_KEY` is configured, LangChain's OpenAI-compatible chat model endpoint at OpenRouter selects from an allowlist of tools. Without the key, on an OpenRouter error, or when the model does not return one approved tool call, the existing rule-based chat remains available. The API key is optional and is never required for backend startup.
 
 ## Stack
 
@@ -37,6 +40,8 @@ Use the existing `real_estate` database and dataset. Set a local `DATABASE_URL` 
 ```dotenv
 DATABASE_URL=postgresql+psycopg2://USER:PASSWORD@HOST:5432/real_estate
 ```
+
+OpenRouter is optional. To enable model-assisted tool selection, set `OPENROUTER_API_KEY` in the local `backend/.env`. The default model is `openai/gpt-4o-mini`; set `OPENROUTER_MODEL` there to choose a different model supported by OpenRouter. Do not commit `.env` or put credentials in source code. No OpenRouter key is needed to start the backend or use rule-based chat.
 
 Do not commit `.env`. The checked-in `.gitignore` excludes `.env` and related files. Never run `DROP`, `TRUNCATE`, or destructive data cleanup commands against the existing database.
 
@@ -74,7 +79,7 @@ User IDs are supplied by the caller in this assignment build. Portfolio and prop
 - `GET /users/{user_id}/portfolio/summary`, `/by-location`, `/rent`: user-scoped analytics.
 - `POST /properties`: validate and add a property; returns the created property and generated ID.
 - `PUT /users/{user_id}/properties/{property_id}`: update only supplied supported fields.
-- `POST /chat` and `GET /conversations/{user_id}`: rule-based chat and recent history.
+- `POST /chat` and `GET /conversations/{user_id}`: optional OpenRouter-assisted tool selection with rule-based fallback, and recent history.
 - `GET /admin/users`, `GET /admin/conversations`, `GET /admin/conversations/{id}`: basic business inspection.
 - `PATCH /admin/conversations/{id}/flag`: set or clear an attention flag.
 - `GET /admin/tool-activity`: inspect recent chat tool activity.
@@ -83,7 +88,7 @@ The pre-existing global portfolio routes now require `user_id` and return user-s
 
 ## Actual And Hypothetical Data
 
-Actual analytics query the selected user's saved property rows. Supported hypothetical rent, purchase, and sale questions perform in-memory arithmetic only, explicitly label the result, and do not change PostgreSQL. The hypothetical purchase total assumes the entered amount is added to current estimated portfolio value; it does not model costs, financing, or income. Missing purchase price remains unavailable; appreciation is not estimated.
+Actual analytics query the selected user's saved property rows. Supported hypothetical value-change, rent, purchase, and sale questions perform in-memory arithmetic only, explicitly label the result, and do not change PostgreSQL. The hypothetical purchase total assumes the entered amount is added to current estimated portfolio value; it does not model costs, financing, or income. Missing purchase price remains unavailable; appreciation is not estimated without required inputs.
 
 ## Tests
 
@@ -97,7 +102,7 @@ Tests create a temporary in-memory SQLite database and do not connect to or modi
 
 ## AI Architecture
 
-There is no LLM integration yet. When credentials and approval are available, an optional LangChain/OpenRouter layer may select only approved backend tools. SQL access, authorization, data validation, and hypothetical calculations must remain deterministic backend responsibilities. The API must continue to start and use the rule-based fallback without an LLM key.
+The optional LangChain/OpenRouter adapter interprets each request and selects at most one approved tool. Tool schemas do not accept a user ID; the backend injects the request's user ID for every read or write. Model-proposed add and update fields are validated before the existing database tools run. The model cannot run SQL or write directly to PostgreSQL. The backend formats responses from tool results, so portfolio facts and hypothetical calculations are not generated by the LLM. The rule-based chat remains the fallback when no key is set or the model is unavailable. No RAG, vector database, or multi-agent system is used.
 
 ## Engineering Decisions
 

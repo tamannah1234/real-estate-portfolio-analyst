@@ -13,6 +13,7 @@ from app.tools import (
     get_user,
     add_property,
     update_property,
+    hypothetical_value_change,
     log_tool_activity
 )
 
@@ -149,6 +150,60 @@ def _build_response(user_id: str, message: str, response: str, tool_name: str):
     )
 
 
+def _format_selected_tool_result(tool_name: str, result) -> str:
+    if isinstance(result, str):
+        return result
+    if result is None:
+        if tool_name == "add_property":
+            return "I couldn't find that user account, so the property was not added."
+        return "I couldn't find that property in your portfolio."
+
+    if tool_name == "get_portfolio_summary":
+        return (
+            f"Your portfolio has {result['property_count']} properties with a "
+            f"total estimated value of ₹{result['total_estimated_value_inr']:,}."
+        )
+    if tool_name == "get_portfolio_by_location":
+        locations = result["locations"]
+        if not locations:
+            return "Your portfolio does not have any properties yet."
+        details = ", ".join(
+            f"{item['location']}: ₹{item['total_value_inr']:,}"
+            for item in locations
+        )
+        return f"Your portfolio by location is: {details}"
+    if tool_name == "get_portfolio_rent":
+        return f"Your total annual rental income is ₹{result['total_annual_rent_inr']:,}."
+    if tool_name == "get_highest_value_property":
+        return (
+            f"The property with the highest current estimated value in your "
+            f"portfolio is {result['property_id']} in {result['location']}, "
+            f"valued at ₹{result['current_estimated_value_inr']:,.2f}."
+        )
+    if tool_name == "get_property":
+        return _format_property_details(result)
+    if tool_name == "add_property":
+        return f"Added property {result['property_id']} to your portfolio."
+    if tool_name == "update_property":
+        return f"Updated property {result['property_id']}. {_format_property_details(result)}"
+    if tool_name == "hypothetical_value_change":
+        if "error" in result:
+            return result["error"]
+        if result["current_value_inr"] is None:
+            return (
+                f"I can't calculate this hypothetical scenario because the current "
+                f"estimated value for {result['property_id']} is not available."
+            )
+        change = result["percentage_change"]
+        return (
+            f"Hypothetical scenario only: if {result['property_id']}'s current "
+            f"estimated value of ₹{result['current_value_inr']:,.2f} changed by "
+            f"{change:g}%, its hypothetical value would be "
+            f"₹{result['hypothetical_value_inr']:,.2f}. No database data was changed."
+        )
+    return "I couldn't safely complete that request."
+
+
 def process_chat(request: ChatRequest, db: Session):
     message = request.message.lower()
     user = get_user(db, request.user_id)
@@ -161,6 +216,61 @@ def process_chat(request: ChatRequest, db: Session):
     history = get_conversation_history(db, request.user_id)
     latest_assistant = history[0]["assistant_response"].lower() if history else ""
     previous_messages = [item["user_message"] for item in history]
+
+    from app.llm_agent import execute_tool, select_tool
+
+    try:
+        selection = select_tool(request.user_id, request.message, history)
+    except Exception:
+        selection = None
+    if selection:
+        from app.llm_agent import validate_tool_selection
+
+        validated_tool = validate_tool_selection(
+            request.message,
+            selection["name"]
+        )
+
+        # Backend validation for obvious portfolio intents
+        normalized_message = request.message.lower()
+
+        if (
+            "highest" in normalized_message
+            and "value" in normalized_message
+        ):
+            validated_tool = "get_highest_value_property"
+
+        elif (
+            (
+                "annual rent" in normalized_message
+                or "rental income" in normalized_message
+            )
+            and "highest" not in normalized_message
+        ):
+            validated_tool = "get_portfolio_rent"
+
+        elif (
+            "portfolio value" in normalized_message
+            or "total value" in normalized_message
+        ):
+            validated_tool = "get_portfolio_summary"
+
+        selection["name"] = validated_tool
+
+        try:
+            selected_result = execute_tool(db, request.user_id, selection)
+        except Exception:
+            db.rollback()
+            selected_result = (selection["name"], "I couldn't safely complete that request.")
+        if selected_result:
+            tool_name, result = selected_result
+            return _build_response(
+                request.user_id,
+                request.message,
+                _format_selected_tool_result(tool_name, result),
+                tool_name
+            )
+
     is_hypothetical = any(
         phrase in message
         for phrase in ("what if", "hypothetically", "suppose i", "if i buy", "if i sell")
@@ -180,29 +290,25 @@ def process_chat(request: ChatRequest, db: Session):
             message
         )
         if property_id and value_change:
-            property_data = get_property(db, property_id, request.user_id)
-            if not property_data:
+            result = hypothetical_value_change(
+                db,
+                property_id,
+                request.user_id,
+                float(value_change.group(2)) * (
+                    -1 if value_change.group(1).startswith(("decreas", "drop", "fall")) else 1
+                )
+            )
+            if result is None:
                 response = f"I couldn't find property {property_id} in your portfolio."
+            elif result.get("error"):
+                response = result["error"]
+            elif result["current_value_inr"] is None:
+                response = (
+                    f"I can't calculate this hypothetical scenario because "
+                    f"the current estimated value for {property_id} is not available."
+                )
             else:
-                current_value = property_data["current_estimated_value_inr"]
-                if current_value is None:
-                    response = (
-                        f"I can't calculate this hypothetical scenario because "
-                        f"the current estimated value for {property_id} is not available."
-                    )
-                else:
-                    direction = value_change.group(1)
-                    percentage = float(value_change.group(2))
-                    is_decrease = direction.startswith(("decreas", "drop", "fall"))
-                    factor = 1 - percentage / 100 if is_decrease else 1 + percentage / 100
-                    hypothetical_value = float(current_value) * factor
-                    change_word = "decreased" if is_decrease else "increased"
-                    response = (
-                        f"Hypothetical scenario only: if {property_id}'s current "
-                        f"estimated value of ₹{float(current_value):,.2f} {change_word} "
-                        f"by {percentage:g}%, its hypothetical value would be "
-                        f"₹{hypothetical_value:,.2f}. No database data was changed."
-                    )
+                response = _format_selected_tool_result("hypothetical_value_change", result)
             return _build_response(
                 request.user_id,
                 request.message,

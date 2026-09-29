@@ -72,6 +72,34 @@ def get_portfolio_rent(db: Session, user_id: str | None = None):
         "properties": [dict(row) for row in result]
     }
 
+
+def get_highest_value_property(db: Session, user_id: str):
+    result = db.execute(
+        text("""
+            SELECT
+                property_id,
+                user_id,
+                property_type,
+                sub_type,
+                location,
+                area_sqft,
+                current_estimated_value_inr,
+                purchase_price_inr,
+                annual_rent_inr,
+                occupancy_status,
+                tenant_status,
+                ownership_percent,
+                status
+            FROM properties
+            WHERE user_id = :user_id
+                AND current_estimated_value_inr IS NOT NULL
+            ORDER BY current_estimated_value_inr DESC, property_id ASC
+            LIMIT 1
+        """),
+        {"user_id": user_id}
+    ).mappings().first()
+    return dict(result) if result else None
+
 def get_property(
     db: Session,
     property_id: str,
@@ -105,6 +133,37 @@ def get_property(
         return None
 
     return dict(result)
+
+
+def hypothetical_value_change(
+    db: Session,
+    property_id: str,
+    user_id: str,
+    percentage_change: float
+):
+    if percentage_change < -100:
+        return {"error": "Percentage change cannot be less than -100%."}
+
+    property_data = get_property(db, property_id, user_id)
+    if not property_data:
+        return None
+
+    current_value = property_data["current_estimated_value_inr"]
+    if current_value is None:
+        return {
+            "property_id": property_id,
+            "current_value_inr": None,
+            "percentage_change": percentage_change,
+            "hypothetical_value_inr": None
+        }
+
+    hypothetical_value = float(current_value) * (1 + percentage_change / 100)
+    return {
+        "property_id": property_id,
+        "current_value_inr": float(current_value),
+        "percentage_change": percentage_change,
+        "hypothetical_value_inr": hypothetical_value
+    }
 
 
 def add_property(db: Session, property_data: dict):

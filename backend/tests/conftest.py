@@ -9,6 +9,7 @@ from sqlalchemy.orm import sessionmaker
 from sqlalchemy.pool import StaticPool
 
 from app.database import get_db
+from app import llm_agent
 from app.main import app
 
 
@@ -94,7 +95,9 @@ def db_session():
 
 
 @pytest.fixture
-def client(db_session):
+def client(db_session, monkeypatch):
+    monkeypatch.setattr(llm_agent, "select_tool", lambda *args: None)
+
     def override_get_db():
         yield db_session
 
